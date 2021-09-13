@@ -13,9 +13,7 @@
 
 const _ = require('lodash');
 const LEVELS = {
-    none: 'none', // Enables to override inherited permissions.
     read: 'read',
-    edit: 'edit',
     admin: 'admin'
 };
 
@@ -31,6 +29,8 @@ module.exports.model = function (sequelize, DataTypes) {
                     model: 'Groups',
                     key: 'id'
                 },
+                onUpdate: 'CASCADE',
+                onDelete: 'CASCADE',
                 primaryKey: true
             },
             level: {

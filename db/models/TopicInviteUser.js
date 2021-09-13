@@ -37,17 +37,23 @@ module.exports = function (sequelize, DataTypes) {
     TopicInviteUser.associate = function (models) {
         TopicInviteUser.belongsTo(models.Topic, {
             foreignKey: 'topicId',
-            as: 'topic'
+            as: 'topic',
+            onUpdate: 'CASCADE',
+            onDelete: 'CASCADE'
         });
 
         TopicInviteUser.belongsTo(models.User, {
             foreignKey: 'creatorId',
-            as: 'creator'
+            as: 'creator',
+            onUpdate: 'CASCADE',
+            onDelete: 'CASCADE'
         });
 
         TopicInviteUser.belongsTo(models.User, {
             foreignKey: 'userId',
-            as: 'user'
+            as: 'user',
+            onUpdate: 'CASCADE',
+            onDelete: 'CASCADE'
         });
     };
 
@@ -72,9 +78,10 @@ module.exports = function (sequelize, DataTypes) {
 
         if (this.dataValues.user) {
             data.user = this.dataValues.user;
-            if (data.user.email) {
-                data.user.email = util.emailToMaskedEmail(data.user.email);
-            }
+            // FIXME: REMOVE THIS COMMENT IF we have a green light to show full e-mail - https://github.com/citizenos/citizenos-fe/issues/657#issuecomment-829314888
+            // if (data.user.email) {
+            //     data.user.email = util.emailToMaskedEmail(data.user.email);
+            // }
         }
 
         return data;

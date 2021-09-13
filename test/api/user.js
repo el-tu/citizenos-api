@@ -30,7 +30,7 @@ const _userUpdate = async function (agent, userId, name, email, password, langua
         .expect('Content-Type', /json/);
 };
 
-const _userDeletePromised = async function (agent, userId, expectedHttpCode) {
+const _userDelete = async function (agent, userId, expectedHttpCode) {
     const path = '/api/users/:userId'
         .replace('userId', userId);
 
@@ -41,8 +41,8 @@ const _userDeletePromised = async function (agent, userId, expectedHttpCode) {
         .expect('Content-Type', /json/);
 };
 
-const userDeletePromised = async function (agent, userId) {
-    return _userDeletePromised(agent, userId, 200);
+const userDelete = async function (agent, userId) {
+    return _userDelete(agent, userId, 200);
 };
 
 const userUpdate = async function (agent, userId, name, email, password, language) {
@@ -95,12 +95,28 @@ const userConsentDelete = async function (agent, userId, partnerId) {
     return _userConsentDelete(agent, userId, partnerId, 200);
 };
 
-exports.userDeletePromised = userDeletePromised;
+const _userConnectionsList = async function (agent, userId, expectedHttpCode) {
+    const path = '/api/users/:userId/userconnections'
+        .replace(':userId', userId);
+
+    return agent
+        .get(path)
+        .set('Content-Type', 'application/json')
+        .expect(expectedHttpCode)
+        .expect('Content-Type', /json/);
+};
+
+const userConnectionsList = async function (agent, userId) {
+    return _userConnectionsList(agent, userId, 200);
+};
+
+exports.userDelete = userDelete;
 
 const request = require('supertest');
 const app = require('../../app');
 const models = app.get('models');
-const uuid = require('node-uuid');
+const uuid = require('uuid');
+const cosUtil = app.get('util');
 
 const assert = require('chai').assert;
 const cryptoLib = app.get('cryptoLib');
@@ -110,6 +126,7 @@ const userLib = require('./lib/user')(app);
 const auth = require('./auth');
 
 const User = models.User;
+const UserConnection = models.UserConnection;
 const Partner = models.Partner;
 
 suite('User', function () {
@@ -130,7 +147,7 @@ suite('User', function () {
             email = 'test_' + Math.random().toString(36).replace(/[^a-z0-9]+/g, '') + 'A1@test.com';
             password = 'Test123';
 
-            user = await userLib.createUserAndLoginPromised(agent, email, password, null);
+            user = await userLib.createUserAndLogin(agent, email, password, null);
         });
 
         test('Success - change name & password', async function () {
@@ -138,8 +155,8 @@ suite('User', function () {
             const passwordNew = 'aaAA123';
 
             await userUpdate(agent, user.id, nameNew, null, passwordNew, null);
-            await auth.logoutPromised(agent);
-            await auth.loginPromised(agent, email, passwordNew);
+            await auth.logout(agent);
+            await auth.login(agent, email, passwordNew);
             const u = await User.findOne({
                 where: {id: user.id}
             });
@@ -156,10 +173,10 @@ suite('User', function () {
             const passwordNew = 'aaAA123';
 
             await userUpdate(agent, user.id, nameNew, emailNew, passwordNew, null);
-            await auth.logoutPromised(agent);
+            await auth.logout(agent);
             let u = await User.findOne({
                 where: {id: user.id}
-            })
+            });
             assert.equal(u.emailIsVerified, false);
             await User.update(
                 {emailIsVerified: true},
@@ -169,13 +186,13 @@ suite('User', function () {
                     },
                     limit: 1
                 }
-            )
+            );
 
-            await auth.loginPromised(agent, emailNew, passwordNew);
+            await auth.login(agent, emailNew, passwordNew);
 
             u = await User.findOne({
                 where: {id: user.id}
-            })
+            });
 
             assert.property(u, 'id');
             assert.equal(u.email, emailNew);
@@ -259,7 +276,7 @@ suite('User', function () {
             suiteSetup(async function () {
                 agent = request.agent(app);
 
-                user = await userLib.createUserAndLoginPromised(agent, null, null, null);
+                user = await userLib.createUserAndLogin(agent, null, null, null);
                 return Partner.upsert(TEST_PARTNER)
             });
             test('Success', async function () {
@@ -280,7 +297,7 @@ suite('User', function () {
             suiteSetup(async function () {
                 agent = request.agent(app);
 
-                user = await userLib.createUserAndLoginPromised(agent, null, null, null);
+                user = await userLib.createUserAndLogin(agent, null, null, null);
                 return Partner.upsert(TEST_PARTNER)
             });
 
@@ -316,7 +333,7 @@ suite('User', function () {
             suiteSetup(async function () {
                 agent = request.agent(app);
 
-                user = await userLib.createUserAndLoginPromised(agent, null, null, null);
+                user = await userLib.createUserAndLogin(agent, null, null, null);
                 return Partner.upsert(TEST_PARTNER)
             });
 
@@ -340,16 +357,16 @@ suite('User', function () {
             email = 'test_' + Math.random().toString(36).replace(/[^a-z0-9]+/g, '') + 'A1@test.com';
             email2 = 'test_' + Math.random().toString(36).replace(/[^a-z0-9]+/g, '') + 'A2@test.com';
             password = 'Test123';
-            user = await userLib.createUserAndLoginPromised(agent, email, password, null);
-            user2 = await userLib.createUserPromised(agent2, email2, password, null);
+            user = await userLib.createUserAndLogin(agent, email, password, null);
+            user2 = await userLib.createUser(agent2, email2, password, null);
         });
 
         test('Success', async function () {
-            return userDeletePromised(agent, user.id);
+            return userDelete(agent, user.id);
         });
 
         test('Fail - try deleting other user', async function () {
-            return _userDeletePromised(agent2, user.id, 401);
+            return _userDelete(agent2, user.id, 401);
         });
 
         teardown(async function () {
@@ -360,5 +377,123 @@ suite('User', function () {
                     }
                 });
         });
+    });
+
+    suite('UserConnections', function () {
+        const agent = request.agent(app);
+
+        let user;
+
+        setup(async function () {
+            user = await userLib.createUser(agent); // Creates connection with e-mail
+        });
+
+        test('Success - 20000 - 1 connection - emails only', async function () {
+            const res = await userConnectionsList(agent, user.email);
+
+            const bodyExpected = {
+                status: {
+                    code: 20000
+                },
+                data: {
+                    count: 1,
+                    rows: [
+                        {
+                            connectionId: UserConnection.CONNECTION_IDS.citizenos
+                        }
+                    ]
+                }
+            };
+
+            assert.deepEqual(res.body, bodyExpected);
+        });
+
+        test('Success - 2000 - 4 connections - citizenos, google, esteid, smartid', async function () {
+            // UserConnection "citizenos" is created on signup
+            await UserConnection.create({
+                userId: user.id,
+                connectionId: UserConnection.CONNECTION_IDS.google,
+                connectionUserId: 'test_generated_google1234' + cosUtil.randomString()
+            });
+
+            await UserConnection.create({
+                userId: user.id,
+                connectionId: UserConnection.CONNECTION_IDS.esteid,
+                connectionUserId: 'test_generated_esteid_' + cosUtil.randomString()
+            });
+
+            await UserConnection.create({
+                userId: user.id,
+                connectionId: UserConnection.CONNECTION_IDS.smartid,
+                connectionUserId: 'test_generated_smartId_`' + cosUtil.randomString()
+            });
+
+            const res = await userConnectionsList(agent, user.email);
+
+            const bodyExpected = {
+                status: {
+                    code: 20000
+                },
+                data: {
+                    count: 4,
+                    rows: [
+                        {
+                            connectionId: UserConnection.CONNECTION_IDS.citizenos
+                        },
+                        {
+                            connectionId: UserConnection.CONNECTION_IDS.esteid
+                        },
+                        {
+                            connectionId: UserConnection.CONNECTION_IDS.google
+                        },
+                        {
+                            connectionId: UserConnection.CONNECTION_IDS.smartid
+                        }
+                    ]
+                }
+            };
+
+            assert.deepEqual(res.body, bodyExpected);
+        });
+
+        test('Fail - 40400 - not found by valid UUID', async function () {
+            const res = await _userConnectionsList(agent, uuid.v4(), 404);
+
+            const bodyExpected = {
+                status: {
+                    code: 40400,
+                    message: 'Not Found'
+                }
+            };
+
+            assert.deepEqual(res.body, bodyExpected);
+        });
+
+        test('Fail - 40400 - not found by valid e-mail', async function () {
+            const res = await _userConnectionsList(agent, 'citizenos_test_get_user_connections_404@test.com', 404);
+
+            const bodyExpected = {
+                status: {
+                    code: 40400,
+                    message: 'Not Found'
+                }
+            };
+
+            assert.deepEqual(res.body, bodyExpected);
+        });
+
+        test('Fail - 40001 - invalid userId', async function () {
+            const res = await _userConnectionsList(agent, '123', 400);
+
+            const bodyExpected = {
+                status: {
+                    code: 40001,
+                    message: 'Invalid userId'
+                }
+            };
+
+            assert.deepEqual(res.body, bodyExpected);
+        });
+
     });
 });

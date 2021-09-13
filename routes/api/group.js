@@ -19,53 +19,50 @@ module.exports = function (app) {
 
     const loginCheck = app.get('middleware.loginCheck');
     const asyncMiddleware = app.get('middleware.asyncMiddleware');
-    const DEPRECATED = app.get('middleware.deprecated'); // CAPS for ease of spotting in the code
 
     const Group = models.Group;
     const GroupInviteUser = models.GroupInviteUser;
-    const GroupMember = models.GroupMember;
+    const GroupMemberUser = models.GroupMemberUser;
     const User = models.User;
 
-    const _hasPermission = function (groupId, userId, level, allowPublic, allowSelf) {
-        return db
-            .query('\
-                    SELECT \
-                        g.visibility = \'public\' AS "isPublic", \
-                        gm.level::"enum_GroupMembers_level" >= :level AS "allowed", \
-                        gm."userId" AS uid, \
-                        gm."level" AS level, \
-                        g.id \
-                    FROM "Groups" g \
-                    LEFT JOIN "GroupMembers" gm \
-                        ON(gm."groupId" = g.id) \
-                    WHERE g.id = :groupId \
-                        AND gm."userId" = :userId \
-                        AND gm."deletedAt" IS NULL \
-                        AND g."deletedAt" IS NULL \
-                    GROUP BY id, uid, level;', {
-                replacements: {
-                    groupId: groupId,
-                    userId: userId,
-                    level: level
-                },
-                type: db.QueryTypes.SELECT,
-                raw: true
-            })
-            .then(function (result) {
-                if (result && result[0]) {
-                    const isPublic = result[0].isPublic;
-                    const isAllowed = result[0].allowed;
+    const _hasPermission = async function (groupId, userId, level, allowPublic, allowSelf) {
+        try {
+            const result = await db.query(`
+                SELECT
+                    g.visibility = \'public\' AS "isPublic",
+                    gm.level::"enum_GroupMemberUsers_level" >= :level AS "allowed",
+                    gm."userId" AS uid,
+                    gm."level" AS level,
+                    g.id
+                FROM "Groups" g
+                LEFT JOIN "GroupMemberUsers" gm
+                    ON(gm."groupId" = g.id)
+                WHERE g.id = :groupId
+                    AND gm."userId" = :userId
+                    AND gm."deletedAt" IS NULL
+                    AND g."deletedAt" IS NULL
+                GROUP BY id, uid, level;`, {
+            replacements: {
+                groupId: groupId,
+                userId: userId,
+                level: level
+            },
+            type: db.QueryTypes.SELECT,
+            raw: true
+        });
+        if (result && result[0]) {
+            const isPublic = result[0].isPublic;
+            const isAllowed = result[0].allowed;
 
-                    if (isAllowed || (allowPublic && isPublic) || allowSelf) {
-                        return Promise.resolve(true);
-                    }
-                }
+            if (isAllowed || (allowPublic && isPublic) || allowSelf) {
+                return true;
+            }
+        }
 
-                return Promise.reject();
-            })
-            .catch(function (err) {
-                return Promise.reject(err);
-            });
+            return Promise.reject();
+        } catch(err) {
+            return Promise.reject(err);
+        }
     };
     const hasPermission = function (level, allowPublic, allowSelf) {
         return function (req, res, next) {
@@ -130,7 +127,7 @@ module.exports = function (app) {
                             ,
                             {
                                 through: {
-                                    level: GroupMember.LEVELS.admin
+                                    level: GroupMemberUser.LEVELS.admin
                                 },
                                 transaction: t
                             }
@@ -147,7 +144,7 @@ module.exports = function (app) {
     /**
      * Read a Group
      */
-    app.get('/api/users/:userId/groups/:groupId', loginCheck(['partner']), hasPermission(GroupMember.LEVELS.read, null, null), function (req, res, next) {
+    app.get('/api/users/:userId/groups/:groupId', loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.read, null, null), function (req, res, next) {
         db
             .query(
                 'SELECT \
@@ -164,7 +161,7 @@ module.exports = function (app) {
                     LEFT JOIN "Users" c ON (c.id = g."creatorId") \
                     LEFT JOIN ( \
                         SELECT "groupId", count("userId") AS "count" \
-                        FROM "GroupMembers" \
+                        FROM "GroupMemberUsers" \
                         WHERE "deletedAt" IS NULL \
                         GROUP BY "groupId" \
                     ) AS mc ON (mc."groupId" = g.id) \
@@ -191,7 +188,7 @@ module.exports = function (app) {
     /**
      * Update Group info
      */
-    app.put('/api/users/:userId/groups/:groupId', loginCheck(['partner']), hasPermission(GroupMember.LEVELS.admin, null, null), function (req, res, next) {
+    app.put('/api/users/:userId/groups/:groupId', loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.admin, null, null), function (req, res, next) {
         const groupId = req.params.groupId;
         const groupName = req.body.name;
 
@@ -249,7 +246,7 @@ module.exports = function (app) {
                                                         "Users" c ON (c.id = g."creatorId") \
                                                             LEFT JOIN ( \
                                                                 SELECT "groupId", count("userId") AS "count" \
-                                                                FROM "GroupMembers" \
+                                                                FROM "GroupMemberUsers" \
                                                                 WHERE "deletedAt" IS NULL \
                                                                 GROUP BY "groupId" \
                                                             ) AS mc ON (mc."groupId" = g.id);'
@@ -282,40 +279,34 @@ module.exports = function (app) {
     /**
      * Delete Group
      */
-    app.delete('/api/users/:userId/groups/:groupId', loginCheck(['partner']), hasPermission(GroupMember.LEVELS.admin, null, null), function (req, res, next) {
-        Group
-            .findByPk(req.params.groupId)
-            .then(function (group) {
-                if (!group) {
-                    res.notFound('No such Group found.');
+    app.delete('/api/users/:userId/groups/:groupId', loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.admin, null, null), async function (req, res, next) {
+        try {
+            const group = await Group.findByPk(req.params.groupId);
+            if (!group) {
+                return res.notFound('No such Group found.');
+            }
 
-                    return Promise.reject();
-                }
-
-                return db.transaction(function (t) {
-                    return GroupMember.destroy({where: {groupId: group.id}}, {transaction: t})
-                        .then(function () {
-                            return group.destroy({transaction: t});
-                        })
-                        .then(function () {
-                            return cosActivities
-                                .deleteActivity(
-                                    group,
-                                    null,
-                                    {
-                                        type: 'User',
-                                        id: req.user.id,
-                                        ip: req.ip
-                                    },
-                                    req.method + ' ' + req.path, t
-                                );
-                        });
+            await db.transaction(async function (t) {
+                await GroupMemberUser.destroy({where: {groupId: group.id}}, {transaction: t});
+                await group.destroy({transaction: t});
+                await cosActivities.deleteActivity(
+                    group,
+                    null,
+                    {
+                        type: 'User',
+                        id: req.user.id,
+                        ip: req.ip
+                    },
+                    req.method + ' ' + req.path, t
+                );
+                t.afterCommit(() => {
+                    return res.ok();
                 });
-            })
-            .then(function () {
-                return res.ok();
-            })
-            .catch(next);
+            });
+        }
+        catch(err) {
+            return next (err);
+        }
     });
 
 
@@ -363,7 +354,7 @@ module.exports = function (app) {
                                     \'user\' as type, \
                                     gmu."groupId" as "groupId", \
                                     gmu.level::text as "memberLevel" \
-                                FROM "GroupMembers" gmu \
+                                FROM "GroupMemberUsers" gmu \
                                 LEFT JOIN "Users" u \
                                 ON u.id = gmu."userId" \
                                 WHERE gmu."deletedAt" IS NULL';
@@ -378,7 +369,7 @@ module.exports = function (app) {
                                 tmg.level::text, \
                                 2 as "priority" \
                             FROM "TopicMemberGroups" tmg \
-                                LEFT JOIN "GroupMembers" gm \
+                                LEFT JOIN "GroupMemberUsers" gm \
                             ON tmg."groupId" = gm."groupId" \
                             WHERE tmg."deletedAt" IS NULL \
                              \
@@ -417,11 +408,11 @@ module.exports = function (app) {
                     ' + returnFields + ' \
                     gt.title as "members.topics.latest.title" \
                 FROM "Groups" g \
-                    JOIN "GroupMembers" gm ON (gm."groupId" = g.id) \
+                    JOIN "GroupMemberUsers" gm ON (gm."groupId" = g.id) \
                     JOIN "Users" c ON (c.id = g."creatorId") \
                     JOIN ( \
                         SELECT "groupId", count("userId") AS "count" \
-                        FROM "GroupMembers" \
+                        FROM "GroupMemberUsers" \
                         WHERE "deletedAt" IS NULL \
                         GROUP BY "groupId" \
                     ) AS mc ON (mc."groupId" = g.id) \
@@ -535,196 +526,10 @@ module.exports = function (app) {
             .catch(next);
     });
 
-
-    /**
-     * Create new members (GroupMember) to a Group
-     *
-     * @deprecated Use Invite API instead - POST /api/users/:userId/groups/:groupId/invites/users
-     *
-     * @see https://github.com/citizenos/citizenos-fe/issues/348
-     */
-    app.post(['/api/users/:userId/groups/:groupId/members/users'], DEPRECATED('Use invite API - https://github.com/citizenos/citizenos-fe/issues/348'), loginCheck(['partner']), hasPermission(GroupMember.LEVELS.admin, null, null), function (req, res, next) {
-        let members = req.body;
-        const groupId = req.params.groupId;
-
-        const validEmailMembers = [];
-        const validUserIdMembers = [];
-
-        if (!Array.isArray(members)) {
-            members = [members];
-        }
-
-        _(members).forEach(function (m) {
-            // Is it an e-mail?
-            if (validator.isEmail(m.userId)) {
-                validEmailMembers.push(m); // The whole member object with level
-            }
-
-            // Is it User id?
-            if (validator.isUUID(m.userId, 4)) {
-                validUserIdMembers.push(m);
-            }
-        });
-
-        const validEmails = validEmailMembers.map(function (m) {
-            return m.userId;
-        });
-
-        let usersCreatedPromise = Promise.resolve();
-
-        if (validEmails.length) {
-            usersCreatedPromise = User
-                .findAll({
-                    where: {
-                        email: {
-                            [Op.iLike]: {
-                                [Op.any]: validEmails
-                            }
-                        }
-                    },
-                    attributes: ['id', 'email']
-                })
-                .then(function (users) {
-                    _(users).forEach(function (u) {
-                        const member = _.find(validEmailMembers, {userId: u.email});
-                        if (member) {
-                            member.userId = u.id;
-                            validUserIdMembers.push(member);
-                            _.remove(validEmailMembers, member); // Remove the e-mail, so that by the end of the day only e-mails that did not exist remain.
-                        }
-                    });
-
-                    // The leftovers are e-mails for which User did not exist
-                    if (validEmailMembers.length) {
-                        const usersToCreate = [];
-                        _(validEmailMembers).forEach(function (m) {
-                            usersToCreate.push({
-                                email: m.userId,
-                                language: m.language,
-                                password: null,
-                                name: util.emailToDisplayName(m.userId),
-                                source: User.SOURCES.citizenos
-                            });
-                        });
-
-                        return db.transaction(function (t) {
-                            return User
-                                .bulkCreate(usersToCreate, {transaction: t})
-                                .then(function (usersCreated) {
-                                    const userCreateActivityPromises = [];
-                                    usersCreated.forEach(function (u) {
-                                        const createActivityPromise = cosActivities.createActivity(
-                                            u,
-                                            null,
-                                            {
-                                                type: 'System',
-                                                ip: req.ip
-                                            },
-                                            req.method + ' ' + req.path,
-                                            t
-                                        );
-                                        userCreateActivityPromises.push(createActivityPromise);
-                                    });
-
-                                    return Promise
-                                        .all(userCreateActivityPromises)
-                                        .then(function () {
-                                            return usersCreated;
-                                        });
-                                });
-                        });
-                    } else {
-                        return Promise.resolve();
-                    }
-                });
-        }
-
-        usersCreatedPromise
-            .then(function (createdUsers) {
-                if (createdUsers && createdUsers.length) {
-                    _(createdUsers).forEach(function (u) {
-                        const member = {
-                            userId: u.id
-                        };
-
-                        // Sequelize defaultValue has no effect if "undefined" or "null" is set for attribute...
-                        const level = _.find(validEmailMembers, {userId: u.email}).level;
-                        if (level) {
-                            member.level = level;
-                        }
-
-                        validUserIdMembers.push(member);
-                    });
-                }
-
-                // TODO: Creates 1 DB call per Member which is not wise when thinking of performance.
-                // Change once http://sequelize.readthedocs.org/en/latest/api/model/#bulkcreaterecords-options-promisearrayinstance suppors "bulkUpsert"
-                const findOrCreatePromises = validUserIdMembers.map(function (member) {
-                    member.groupId = req.params.groupId;
-
-                    return db
-                        .transaction(function (t) {
-                            return GroupMember
-                                .findOrCreate({
-                                    where: {
-                                        groupId: member.groupId,
-                                        userId: member.userId
-                                    },
-                                    defaults: {
-                                        level: member.level || GroupMember.LEVELS.read
-                                    },
-                                    transaction: t
-                                });
-                        })
-                        .then(function (result) {
-                            return Promise.resolve(result);
-                        });
-                });
-
-                return Promise
-                    .allSettled(findOrCreatePromises)
-                    .then(function (newMembers) {
-                        return Group
-                            .findOne({
-                                where: {
-                                    id: groupId
-                                }
-                            })
-                            .then(function (group) {
-                                const userIdsToInvite = [];
-
-                                newMembers.forEach(function (result, i) {
-                                    if (result.isFulfilled()) {
-                                        const value = result.value(); // findOrCreate returns [instance, created=true/false]
-                                        if (value && value[1]) {
-                                            userIdsToInvite.push(validUserIdMembers[i].userId);
-                                            const user = User.build({id: value[0].userId});
-                                            user.dataValues.id = value[0].userId;
-                                            cosActivities.addActivity(user, {
-                                                type: 'User',
-                                                id: req.user.id,
-                                                ip: req.ip
-                                            }, null, group, req.method + ' ' + req.path);
-                                        }
-                                    } else {
-                                        logger.error('Failed to create a GroupMemberUser', validUserIdMembers[i]);
-                                    }
-                                });
-
-                                return emailLib.sendGroupMemberUserCreate(userIdsToInvite, req.user.id, groupId);
-                            });
-                    });
-            })
-            .then(function () {
-                return res.created();
-            })
-            .catch(next);
-    });
-
     /**
      * Get Group member Users
      */
-    app.get(['/api/users/:userId/groups/:groupId/members/users'], loginCheck(['partner']), hasPermission(GroupMember.LEVELS.read, null, null), async function (req, res, next) {
+    app.get(['/api/users/:userId/groups/:groupId/members/users'], loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.read, null, null), async function (req, res, next) {
         //FIXME: Deprecation warning - https://github.com/citizenos/citizenos-fe/issues/348
 
         const groupId = req.params.groupId;
@@ -748,7 +553,7 @@ module.exports = function (app) {
                         u."imageUrl",
                         gm.level,
                         count(*) OVER()::integer AS "countTotal"
-                    FROM "GroupMembers" gm
+                    FROM "GroupMemberUsers" gm
                         JOIN "Users" u ON (u.id = gm."userId")
                     WHERE gm."groupId" = :groupId
                     AND gm."deletedAt" IS NULL
@@ -788,16 +593,16 @@ module.exports = function (app) {
     /**
      * Update membership information
      */
-    app.put(['/api/users/:userId/groups/:groupId/members/users/:memberId'], loginCheck(['partner']), hasPermission(GroupMember.LEVELS.admin, null, null), function (req, res, next) {
+    app.put(['/api/users/:userId/groups/:groupId/members/users/:memberId'], loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.admin, null, null), function (req, res, next) {
         const newLevel = req.body.level;
         const memberId = req.params.memberId;
         const groupId = req.params.groupId;
 
-        GroupMember
+        GroupMemberUser
             .findAll({
                 where: {
                     groupId: groupId,
-                    level: GroupMember.LEVELS.admin
+                    level: GroupMemberUser.LEVELS.admin
                 },
                 attributes: ['userId'],
                 raw: true
@@ -807,21 +612,21 @@ module.exports = function (app) {
                     return res.badRequest('Cannot revoke admin permissions from the last admin member.');
                 }
 
-                return GroupMember
+                return GroupMemberUser
                     .findOne({
                         where: {
                             groupId: groupId,
                             userId: memberId
                         }
                     })
-                    .then(function (groupMember) {
-                        groupMember.level = newLevel;
+                    .then(function (groupMemberUser) {
+                        groupMemberUser.level = newLevel;
 
                         return db
                             .transaction(function (t) {
                                 return cosActivities
                                     .updateActivity(
-                                        groupMember,
+                                        groupMemberUser,
                                         null,
                                         {
                                             type: 'User',
@@ -832,7 +637,7 @@ module.exports = function (app) {
                                         req.method + ' ' + req.path, t
                                     )
                                     .then(function () {
-                                        return groupMember
+                                        return groupMemberUser
                                             .save({
                                                 transaction: t
                                             });
@@ -849,15 +654,15 @@ module.exports = function (app) {
     /**
      * Delete membership information
      */
-    app.delete(['/api/users/:userId/groups/:groupId/members/users/:memberId'], loginCheck(['partner']), hasPermission(GroupMember.LEVELS.admin, null, true), function (req, res, next) {
+    app.delete(['/api/users/:userId/groups/:groupId/members/users/:memberId'], loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.admin, null, true), function (req, res, next) {
         const groupId = req.params.groupId;
         const memberId = req.params.memberId;
 
-        GroupMember
+        GroupMemberUser
             .findAll({
                 where: {
                     groupId: groupId,
-                    level: GroupMember.LEVELS.admin
+                    level: GroupMemberUser.LEVELS.admin
                 },
                 attributes: ['userId'],
                 raw: true
@@ -894,11 +699,11 @@ module.exports = function (app) {
                                     .query(
                                         '\
                                         DELETE FROM \
-                                            "GroupMembers" \
+                                            "GroupMemberUsers" \
                                         WHERE ctid IN (\
                                             SELECT \
                                                 ctid \
-                                            FROM "GroupMembers" \
+                                            FROM "GroupMemberUsers" \
                                             WHERE "groupId" = :groupId \
                                             AND "userId" = :userId \
                                             LIMIT 1 \
@@ -930,7 +735,7 @@ module.exports = function (app) {
      *
      * @see https://github.com/citizenos/citizenos-fe/issues/348
      */
-    app.post('/api/users/:userId/groups/:groupId/invites/users', loginCheck(), hasPermission(GroupMember.LEVELS.admin, null, null), asyncMiddleware(async function (req, res) {
+    app.post('/api/users/:userId/groups/:groupId/invites/users', loginCheck(), hasPermission(GroupMemberUser.LEVELS.admin, null, null), asyncMiddleware(async function (req, res) {
         //NOTE: userId can be actual UUID or e-mail - it is comfort for the API user, but confusing in the BE code.
         const groupId = req.params.groupId;
         const userId = req.user.id;
@@ -1048,7 +853,7 @@ module.exports = function (app) {
             validUserIdMembers = validUserIdMembers.filter(function (member) {
                 return member.userId !== req.user.id; // Make sure user does not invite self
             });
-            const currentMembers = await GroupMember.findAll({
+            const currentMembers = await GroupMemberUser.findAll({
                 where: {
                     groupId: groupId
                 }
@@ -1059,7 +864,7 @@ module.exports = function (app) {
                     return cmember.userId === member.userId;
                 });
                 if (existingMember) {
-                    const levelsArray = Object.keys(GroupMember.LEVELS);
+                    const levelsArray = Object.keys(GroupMemberUser.LEVELS);
                     if (existingMember.level !== member.level) {
                         if (levelsArray.indexOf(member.level) > levelsArray.indexOf(existingMember.level)) {
                             await existingMember.update({
@@ -1141,7 +946,7 @@ module.exports = function (app) {
      *
      * @see https://github.com/citizenos/citizenos-fe/issues/348
      */
-    app.get('/api/users/:userId/groups/:groupId/invites/users', loginCheck(), hasPermission(GroupMember.LEVELS.read, null, null), asyncMiddleware(async function (req, res) {
+    app.get('/api/users/:userId/groups/:groupId/invites/users', loginCheck(), hasPermission(GroupMemberUser.LEVELS.read, null, null), asyncMiddleware(async function (req, res, next) {
         const limitDefault = 10;
         const offset = parseInt(req.query.offset, 10) ? parseInt(req.query.offset, 10) : 0;
         let limit = parseInt(req.query.limit, 10) ? parseInt(req.query.limit, 10) : limitDefault;
@@ -1266,7 +1071,7 @@ module.exports = function (app) {
 
             let hasAccess;
             try {
-                hasAccess = await _hasPermission(groupId, invite.userId, GroupMember.LEVELS.read, null, null);
+                hasAccess = await _hasPermission(groupId, invite.userId, GroupMemberUser.LEVELS.read, null, null);
             } catch (e) {
                 hasAccess = false;
             }
@@ -1297,7 +1102,7 @@ module.exports = function (app) {
      *
      * @see https://github.com/citizenos/citizenos-fe/issues/348
      */
-    app.delete(['/api/groups/:groupId/invites/users/:inviteId', '/api/users/:userId/groups/:groupId/invites/users/:inviteId'], loginCheck(), hasPermission(GroupMember.LEVELS.admin), asyncMiddleware(async function (req, res) {
+    app.delete(['/api/groups/:groupId/invites/users/:inviteId', '/api/users/:userId/groups/:groupId/invites/users/:inviteId'], loginCheck(), hasPermission(GroupMemberUser.LEVELS.admin), asyncMiddleware(async function (req, res) {
         const groupId = req.params.groupId;
         const inviteId = req.params.inviteId;
 
@@ -1345,7 +1150,7 @@ module.exports = function (app) {
             );
 
         // Find out if the User is already a member of the Group
-        const memberUserExisting = await GroupMember
+        const memberUserExisting = await GroupMemberUser
             .findOne({
                 where: {
                     groupId: groupId,
@@ -1360,7 +1165,7 @@ module.exports = function (app) {
 
             if (memberUserExisting) {
                 // User already a member, see if we need to update the level
-                const levelsArray = Object.keys(GroupMember.LEVELS);
+                const levelsArray = Object.keys(GroupMemberUser.LEVELS);
                 if (levelsArray.indexOf(memberUserExisting.level) < levelsArray.indexOf(invite.level)) {
                     const memberUserUpdated = await memberUserExisting.update({
                         level: invite.level
@@ -1384,11 +1189,11 @@ module.exports = function (app) {
                 });
 
                 const memberUserCreated = await db.transaction(async function (t) {
-                    const member = await GroupMember.create(
+                    const member = await GroupMemberUser.create(
                         {
                             groupId: invite.groupId,
                             userId: invite.userId,
-                            level: GroupMember.LEVELS[invite.level]
+                            level: GroupMemberUser.LEVELS[invite.level]
                         },
                         {
                             transaction: t
@@ -1434,107 +1239,55 @@ module.exports = function (app) {
     /**
      * Get Group Topics
      */
-    app.get('/api/users/:userId/groups/:groupId/topics', loginCheck(['partner']), hasPermission(GroupMember.LEVELS.read, null, null), function (req, res, next) {
-        db
-            .query(
-                'SELECT \
-                    t.id, \
-                    t.title, \
-                    t.visibility, \
-                    t.status, \
-                    t.categories, \
-                    t."endsAt", \
-                    CASE \
-                        WHEN tp."topicId" = t.id THEN true \
-                        ELSE false \
-                    END as "pinned", \
-                    t.hashtag, \
-                    t."updatedAt", \
-                    t."createdAt", \
-                    COALESCE(tmup.level, tmgp.level, \'none\') as "permission.level", \
-                    muc.count as "members.users.count", \
-                    COALESCE(mgc.count, 0) as "members.groups.count" \
-                FROM "TopicMemberGroups" gt \
-                    JOIN "Topics" t ON (t.id = gt."topicId") \
-                    LEFT JOIN ( \
-                        SELECT \
-                            tmu."topicId", \
-                            tmu."userId", \
-                            tmu.level::text AS level \
-                        FROM "TopicMemberUsers" tmu \
-                        WHERE tmu."deletedAt" IS NULL \
-                    ) AS tmup ON (tmup."topicId" = t.id AND tmup."userId" = :userId) \
-                    LEFT JOIN ( \
-                        SELECT \
-                            tmg."topicId", \
-                            gm."userId", \
-                            MAX(tmg.level)::text AS level \
-                        FROM "TopicMemberGroups" tmg \
-                            LEFT JOIN "GroupMembers" gm ON (tmg."groupId" = gm."groupId") \
-                        WHERE tmg."deletedAt" IS NULL \
-                        AND gm."deletedAt" IS NULL \
-                        GROUP BY "topicId", "userId" \
-                    ) AS tmgp ON (tmgp."topicId" = t.id AND tmgp."userId" = :userId) \
-                    LEFT JOIN ( \
-                        SELECT tmu."topicId", COUNT(tmu."memberId") AS "count" FROM ( \
-                            SELECT \
-                                tmuu."topicId", \
-                                tmuu."userId" AS "memberId" \
-                            FROM "TopicMemberUsers" tmuu \
-                            WHERE tmuu."deletedAt" IS NULL \
-                            UNION \
-                            SELECT \
-                                tmg."topicId", \
-                                gm."userId" AS "memberId" \
-                            FROM "TopicMemberGroups" tmg \
-                                JOIN "GroupMembers" gm ON (tmg."groupId" = gm."groupId") \
-                            WHERE tmg."deletedAt" IS NULL \
-                            AND gm."deletedAt" IS NULL \
-                        ) AS tmu GROUP BY "topicId" \
-                    ) AS muc ON (muc."topicId" = t.id) \
-                    LEFT JOIN ( \
-                        SELECT "topicId", count("groupId")::integer AS "count" \
-                        FROM "TopicMemberGroups" \
-                        WHERE "deletedAt" IS NULL \
-                        GROUP BY "topicId" \
-                    ) AS mgc ON (mgc."topicId" = t.id) \
-                    LEFT JOIN "TopicPins" tp ON tp."topicId" = t.id AND tp."userId" = :userId \
-                WHERE gt."groupId" = :groupId \
-                    AND gt."deletedAt" IS NULL \
-                    AND t."deletedAt" IS NULL \
-                ORDER BY "pinned" DESC \
-                    ;'
-                ,
-                {
-                    replacements: {
-                        groupId: req.params.groupId,
-                        userId: req.user.id
-                    },
-                    type: db.QueryTypes.SELECT,
-                    raw: true,
-                    nest: true
-                }
-            )
-            .then(function (topics) {
-                return res.ok({
-                    count: topics.length,
-                    rows: topics
-                });
-            })
-            .catch(next);
-    });
+    app.get('/api/users/:userId/groups/:groupId/topics', loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.read, null, null), async function (req, res, next) {
+        const userId = req.user.id;
+        const visibility = req.query.visibility;
+        const creatorId = req.query.creatorId;
+        let statuses = req.query.statuses;
+        const pinned = req.query.pinned;
+        const hasVoted = req.query.hasVoted; // Filter out Topics where User has participated in the voting process.
+        const showModerated = req.query.showModerated || false;
+        if (statuses && !Array.isArray(statuses)) {
+            statuses = [statuses];
+        }
 
-    /**
-     * Get Group member Topics
-     */
-    app.get('/api/users/:userId/groups/:groupId/members/topics', loginCheck(['partner']), hasPermission(GroupMember.LEVELS.read, null, null), async function (req, res, next) {
-        const limitDefault = 10;
-        const offset = parseInt(req.query.offset, 10) ? parseInt(req.query.offset, 10) : 0;
-        const search = req.query.search;
-        let limit = parseInt(req.query.limit, 10) ? parseInt(req.query.limit, 10) : limitDefault;
-        let where = '';
-        if (search) {
-            where = ` AND t.title ILIKE :search `
+        let where = ` gt."groupId" = :groupId
+            AND gt."deletedAt" IS NULL
+            AND t."deletedAt" IS NULL
+            AND t.title IS NOT NULL `;
+
+        if (visibility) {
+            where += ` AND t.visibility=:visibility `;
+        }
+
+        if (statuses && statuses.length) {
+            where += ` AND t.status IN (:statuses) `;
+        }
+
+        if (pinned) {
+            where += ` AND tp."topicId" = t.id AND tp."userId" = :userId`;
+        }
+
+        if (['true', '1'].includes(hasVoted)) {
+            where += ` AND EXISTS (SELECT TRUE FROM "VoteLists" vl WHERE vl."voteId" = tv."voteId" AND vl."userId" = :userId LIMIT 1)`;
+        } else if (['false', '0'].includes(hasVoted)) {
+            where += ` AND tv."voteId" IS NOT NULL AND t.status = 'voting'::"enum_Topics_status" AND NOT EXISTS (SELECT TRUE FROM "VoteLists" vl WHERE vl."voteId" = tv."voteId" AND vl."userId" = :userId LIMIT 1)`;
+        } else {
+            logger.warn(`Ignored parameter "voted" as invalid value "${hasVoted}" was provided`);
+        }
+
+        if (!showModerated || showModerated == "false") {
+            where += ` AND (tr."moderatedAt" IS NULL OR tr."resolvedAt" IS NOT NULL) `;
+        } else {
+            where += ` AND (tr."moderatedAt" IS NOT NULL AND tr."resolvedAt" IS NULL) `;
+        }
+
+        if (creatorId) {
+            if (creatorId === userId) {
+                where += ` AND u.id =:creatorId `;
+            } else {
+                return res.badRequest('No rights!');
+            }
         }
 
         try {
@@ -1554,18 +1307,13 @@ module.exports = function (app) {
                         t.hashtag,
                         t."updatedAt",
                         t."createdAt",
-                        u.id as "creator.id",
-                        u.name as "creator.name",
-                        u.company as "creator.company",
-                        u."imageUrl" as "creator.imageUrl",
+                        COALESCE(ta."lastActivity", t."updatedAt") as "lastActivity",
                         COALESCE(tmup.level, tmgp.level, 'none') as "permission.level",
-                        COALESCE(tmgp.level, 'none') as "permission.levelGroup",
                         muc.count as "members.users.count",
-                        COALESCE(mgc.count, 0) as "members.groups.count",
-                        count(*) OVER()::integer AS "countTotal"
+                        COALESCE(mgc.count, 0) as "members.groups.count"
                     FROM "TopicMemberGroups" gt
                         JOIN "Topics" t ON (t.id = gt."topicId")
-                        LEFT JOIN "Users" u ON (u.id = t."creatorId")
+                        LEFT JOIN "TopicReports" tr ON  tr."topicId" = t.id
                         LEFT JOIN (
                             SELECT
                                 tmu."topicId",
@@ -1580,7 +1328,7 @@ module.exports = function (app) {
                                 gm."userId",
                                 MAX(tmg.level)::text AS level
                             FROM "TopicMemberGroups" tmg
-                                LEFT JOIN "GroupMembers" gm ON (tmg."groupId" = gm."groupId")
+                                LEFT JOIN "GroupMemberUsers" gm ON (tmg."groupId" = gm."groupId")
                             WHERE tmg."deletedAt" IS NULL
                             AND gm."deletedAt" IS NULL
                             GROUP BY "topicId", "userId"
@@ -1597,7 +1345,7 @@ module.exports = function (app) {
                                     tmg."topicId",
                                     gm."userId" AS "memberId"
                                 FROM "TopicMemberGroups" tmg
-                                    JOIN "GroupMembers" gm ON (tmg."groupId" = gm."groupId")
+                                    JOIN "GroupMemberUsers" gm ON (tmg."groupId" = gm."groupId")
                                 WHERE tmg."deletedAt" IS NULL
                                 AND gm."deletedAt" IS NULL
                             ) AS tmu GROUP BY "topicId"
@@ -1609,22 +1357,256 @@ module.exports = function (app) {
                             GROUP BY "topicId"
                         ) AS mgc ON (mgc."topicId" = t.id)
                         LEFT JOIN "TopicPins" tp ON tp."topicId" = t.id AND tp."userId" = :userId
+                        LEFT JOIN (
+                            SELECT
+                                tv."topicId",
+                                tv."voteId",
+                                v."authType",
+                                v."createdAt",
+                                v."delegationIsAllowed",
+                                v."description",
+                                v."endsAt",
+                                v."maxChoices",
+                                v."minChoices",
+                                v."type",
+                                v."autoClose"
+                            FROM "TopicVotes" tv INNER JOIN
+                                (
+                                    SELECT
+                                        MAX("createdAt") as "createdAt",
+                                        "topicId"
+                                    FROM "TopicVotes"
+                                    GROUP BY "topicId"
+                                ) AS _tv ON (_tv."topicId" = tv."topicId" AND _tv."createdAt" = tv."createdAt")
+                            LEFT JOIN "Votes" v
+                                    ON v.id = tv."voteId"
+                        ) AS tv ON (tv."topicId" = t.id)
+                        LEFT JOIN (
+                            SELECT t.id, MAX(a."updatedAt") as "lastActivity"
+                            FROM "Topics" t JOIN "Activities" a ON ARRAY[t.id::text] <@ a."topicIds" GROUP BY t.id
+                        ) ta ON (ta.id = t.id)
+                    WHERE ${where}
+                    ORDER BY "pinned" DESC, t."updatedAt" DESC
+                        ;`
+                    ,
+                {
+                    replacements: {
+                        groupId: req.params.groupId,
+                        userId: req.user.id,
+                        statuses,
+                        visibility
+                    },
+                    type: db.QueryTypes.SELECT,
+                    raw: true,
+                    nest: true
+                }
+            );
+
+            return res.ok({
+                count: topics.length,
+                rows: topics
+            });
+        } catch (err) {
+            return next(err);
+        }
+    });
+
+    /**
+     * Get Group member Topics
+     */
+    app.get('/api/users/:userId/groups/:groupId/members/topics', loginCheck(['partner']), hasPermission(GroupMemberUser.LEVELS.read, null, null), async function (req, res, next) {
+        const limitDefault = 10;
+        const offset = parseInt(req.query.offset, 10) ? parseInt(req.query.offset, 10) : 0;
+        const search = req.query.search;
+        let limit = parseInt(req.query.limit, 10) ? parseInt(req.query.limit, 10) : limitDefault;
+        let where = '';
+        if (search) {
+            where = ` AND t.title ILIKE :search `
+        }
+        const userId = req.user.id;
+        const visibility = req.query.visibility;
+        const creatorId = req.query.creatorId;
+        let statuses = req.query.statuses;
+        const pinned = req.query.pinned;
+        const hasVoted = req.query.hasVoted; // Filter out Topics where User has participated in the voting process.
+        const showModerated = req.query.showModerated || false;
+        const order = req.query.order;
+        const sortOrder = req.query.sortOrder || 'ASC';
+
+        let sortSql = ` ORDER BY `;
+
+        if (order) {
+            switch (order) {
+                case 'status':
+                    sortSql += ` t.status ${sortOrder} `;
+                    break;
+                case 'pinned':
+                    sortSql += ` pinned ${sortOrder} `;
+                    break;
+                case 'lastActivity':
+                    sortSql += ` "lastActivity" ${sortOrder}`;
+            }
+        } else {
+            sortSql += `"pinned" DESC, t."updatedAt" DESC`;
+        }
+
+        if (statuses && !Array.isArray(statuses)) {
+            statuses = [statuses];
+        }
+
+        if (visibility) {
+            where += ` AND t.visibility=:visibility `;
+        }
+
+        if (statuses && statuses.length) {
+            where += ` AND t.status IN (:statuses) `;
+        }
+
+        if (pinned) {
+            where += ` AND tp."topicId" = t.id AND tp."userId" = :userId`;
+        }
+
+        if (['true', '1'].includes(hasVoted)) {
+            where += ` AND EXISTS (SELECT TRUE FROM "VoteLists" vl WHERE vl."voteId" = tv."voteId" AND vl."userId" = :userId LIMIT 1)`;
+        } else if (['false', '0'].includes(hasVoted)) {
+            where += ` AND tv."voteId" IS NOT NULL AND t.status = 'voting'::"enum_Topics_status" AND NOT EXISTS (SELECT TRUE FROM "VoteLists" vl WHERE vl."voteId" = tv."voteId" AND vl."userId" = :userId LIMIT 1)`;
+        } else {
+            logger.warn(`Ignored parameter "voted" as invalid value "${hasVoted}" was provided`);
+        }
+
+        if (!showModerated || showModerated == "false") {
+            where += ` AND (tr."moderatedAt" IS NULL OR tr."resolvedAt" IS NOT NULL) `;
+        } else {
+            where += ` AND (tr."moderatedAt" IS NOT NULL AND tr."resolvedAt" IS NULL) `;
+        }
+
+        if (creatorId) {
+            if (creatorId === userId) {
+                where += ` AND u.id =:creatorId `;
+            }
+        }
+
+        try {
+            const topics = await db
+                .query(
+                    `SELECT
+                        t.id,
+                        t.title,
+                        t.visibility,
+                        t.status,
+                        t.categories,
+                        t."endsAt",
+                        CASE
+                            WHEN tp."topicId" = t.id THEN true
+                            ELSE false
+                        END as "pinned",
+                        t.hashtag,
+                        t."updatedAt",
+                        t."createdAt",
+                        COALESCE(ta."lastActivity", t."updatedAt") as "lastActivity",
+                        u.id as "creator.id",
+                        u.name as "creator.name",
+                        u.company as "creator.company",
+                        u."imageUrl" as "creator.imageUrl",
+                        COALESCE(tmup.level, tmgp.level, 'none') as "permission.level",
+                        COALESCE(tmgp.level, 'none') as "permission.levelGroup",
+                        muc.count as "members.users.count",
+                        COALESCE(mgc.count, 0) as "members.groups.count",
+                        count(*) OVER()::integer AS "countTotal"
+                    FROM "TopicMemberGroups" gt
+                        JOIN "Topics" t ON (t.id = gt."topicId")
+                        LEFT JOIN "TopicReports" tr ON  tr."topicId" = t.id
+                        LEFT JOIN "Users" u ON (u.id = t."creatorId")
+                        LEFT JOIN (
+                            SELECT
+                                tmu."topicId",
+                                tmu."userId",
+                                tmu.level::text AS level
+                            FROM "TopicMemberUsers" tmu
+                            WHERE tmu."deletedAt" IS NULL
+                        ) AS tmup ON (tmup."topicId" = t.id AND tmup."userId" = :userId)
+                        LEFT JOIN (
+                            SELECT
+                                tmg."topicId",
+                                gm."userId",
+                                MAX(tmg.level)::text AS level
+                            FROM "TopicMemberGroups" tmg
+                                LEFT JOIN "GroupMemberUsers" gm ON (tmg."groupId" = gm."groupId")
+                            WHERE tmg."deletedAt" IS NULL
+                            AND gm."deletedAt" IS NULL
+                            GROUP BY "topicId", "userId"
+                        ) AS tmgp ON (tmgp."topicId" = t.id AND tmgp."userId" = :userId)
+                        LEFT JOIN (
+                            SELECT tmu."topicId", COUNT(tmu."memberId") AS "count" FROM (
+                                SELECT
+                                    tmuu."topicId",
+                                    tmuu."userId" AS "memberId"
+                                FROM "TopicMemberUsers" tmuu
+                                WHERE tmuu."deletedAt" IS NULL
+                                UNION
+                                SELECT
+                                    tmg."topicId",
+                                    gm."userId" AS "memberId"
+                                FROM "TopicMemberGroups" tmg
+                                    JOIN "GroupMemberUsers" gm ON (tmg."groupId" = gm."groupId")
+                                WHERE tmg."deletedAt" IS NULL
+                                AND gm."deletedAt" IS NULL
+                            ) AS tmu GROUP BY "topicId"
+                        ) AS muc ON (muc."topicId" = t.id)
+                        LEFT JOIN (
+                            SELECT "topicId", count("groupId")::integer AS "count"
+                            FROM "TopicMemberGroups"
+                            WHERE "deletedAt" IS NULL
+                            GROUP BY "topicId"
+                        ) AS mgc ON (mgc."topicId" = t.id)
+                        LEFT JOIN "TopicPins" tp ON tp."topicId" = t.id AND tp."userId" = :userId
+                        LEFT JOIN (
+                            SELECT
+                                tv."topicId",
+                                tv."voteId",
+                                v."authType",
+                                v."createdAt",
+                                v."delegationIsAllowed",
+                                v."description",
+                                v."endsAt",
+                                v."maxChoices",
+                                v."minChoices",
+                                v."type",
+                                v."autoClose"
+                            FROM "TopicVotes" tv INNER JOIN
+                                (
+                                    SELECT
+                                        MAX("createdAt") as "createdAt",
+                                        "topicId"
+                                    FROM "TopicVotes"
+                                    GROUP BY "topicId"
+                                ) AS _tv ON (_tv."topicId" = tv."topicId" AND _tv."createdAt" = tv."createdAt")
+                            LEFT JOIN "Votes" v
+                                    ON v.id = tv."voteId"
+                        ) AS tv ON (tv."topicId" = t.id)
+                        LEFT JOIN (
+                            SELECT t.id, MAX(a."updatedAt") as "lastActivity"
+                            FROM "Topics" t JOIN "Activities" a ON ARRAY[t.id::text] <@ a."topicIds" GROUP BY t.id
+                        ) ta ON (ta.id = t.id)
                     WHERE gt."groupId" = :groupId
                         AND gt."deletedAt" IS NULL
                         AND t."deletedAt" IS NULL
                         AND COALESCE(tmup.level, tmgp.level, 'none')::"enum_TopicMemberUsers_level" > 'none'
                         ${where}
-                    ORDER BY "pinned" DESC
+                    ${sortSql}
                     LIMIT :limit
                     OFFSET :offset
                     ;`,
                     {
                         replacements: {
                             groupId: req.params.groupId,
-                            userId: req.user.id,
+                            userId: userId,
+                            creatorId: userId,
                             limit,
                             offset,
                             search: `%${search}%`,
+                            statuses,
+                            visibility
                         },
                         type: db.QueryTypes.SELECT,
                         raw: true,
